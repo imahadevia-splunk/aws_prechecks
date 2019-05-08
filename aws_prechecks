@@ -1,0 +1,203 @@
+#!/bin/bash
+
+unset map_flag
+unset df_flag
+unset snap_flag
+# colors
+red="$(tput setaf 1)";
+green="$(tput setaf 2)";
+yellow="$(tput bold ; tput setaf 3)";
+cyan="$(tput setaf 6)";
+pink="$(tput setaf 213)";
+NC="$(tput sgr0)";
+sync_time=3;
+
+## GitHub Personal Access Token
+GPAT="0822095aeeacb67e0914234ae27ac1962ff71b5f";
+
+function die(){
+    echo "${red}$1${NC}" >&2; exit 1;
+}
+
+function wait_up() {
+  sleep_count=${1}
+  while [ ${sleep_count} -gt 0 ] ; do
+    echo -n .
+    sleep_count=$(( sleep_count - 1 ))
+    sleep 1
+  done
+}
+
+function show_disk_usage(){
+    show_waiting;
+    echo "${green}------------------------------------------------------------------------------${NC}"
+    ssh -qAt -o LogLevel=QUIET -o StrictHostKeyChecking=no $1 "sudo df -Th | grep '^/dev'; echo '******************************************************************************'; sudo lsblk --ascii; echo '******************************************************************************'; sudo pvdisplay; echo '******************************************************************************'; sudo lvdisplay; echo '******************************************************************************'; sudo cat /etc/fstab; echo '******************************************************************************'; sudo blkid"
+    echo "${green}------------------------------------------------------------------------------${NC}"
+}
+
+function show_waiting(){
+    echo -n "${pink} Please Wait " && wait_up ${sync_time};
+    echo "${NC}"
+}
+
+function help () {
+    cat << EOF
+    This Utility is helpful for finding latest snapshot ID of
+    the instance based on the FQDN of the instance provided
+    Also, this is useful for finding EBS Attachment to the instance
+
+    This Utility is useful only for CloudOps Stacks
+
+    NOTE: Make sure your Github Personal Access Token and your AWS Access & Secret keys
+          are set as Environment Variables
+
+    Usage: `basename ${0}` -f "<FQDN_IN_QUOTES>" [-m|-s|-u]
+
+    Args:
+
+    -h => This help message
+    -m => To only print the mapping of the volumes
+    -s => Show Snapshot info of the instance
+    -u => Show Disk Usage of the instance
+    -f => FQDN of the instance (in double-quotes)
+        NOTE: Only one FQDN can be provided at a time
+EOF
+}
+
+function get_instance_list(){
+    if [[ -z "$map_flag" ]] && [[ -z "$snap_flag" ]] && [[ -z "$df_flag" ]]; then
+        die "Please provide an argument along with FQDN (show mapping, show snapshot info or show usage)"
+    fi
+    if [[ -z "$AWS_SECRET_ACCESS_KEY" ]] || [[ -z "$AWS_ACCESS_KEY_ID" ]]; then
+        die "AWS Access & Secret keys are not set! Please set them as your Environment Variables"
+    fi
+    region=$2;
+    if [[ "$region" == "null" ]]; then
+       echo "${yellow} Region not Available from PO ${NC}";
+       unset region;
+    fi
+    while [[ -z "$region" ]]; do
+      echo -n "Enter Region (from ticket) : ";
+      read region;
+    done
+    resp=$(aws ec2 describe-instances --filters "Name=tag:FQDN,Values=$1" --region ${region});
+    instance_id=$(echo $resp | jq -r 'try(.Reservations[0].Instances[0].InstanceId) catch "null"');
+    instance_private_ip=$(echo $resp | jq -r '.Reservations[0].Instances[0].PrivateIpAddress');
+    if [[ $instance_id == "null" ]]; then
+        die "Error: Invalid FQDN Provided!";
+    else
+        if [ "$map_flag" == 1 ]; then
+            show_waiting;
+            vol_ids=( $(echo $resp | jq -r '.Reservations[0].Instances[0].BlockDeviceMappings[].Ebs.VolumeId') );
+            dev_names=( $(echo $resp |  jq -r '.Reservations[0].Instances[0].BlockDeviceMappings[].DeviceName') );
+            instance_public_ip=($(echo $resp | jq -r '.Reservations[0].Instances[0].PublicIpAddress') );
+            root_device=$(echo $resp | jq -r '.Reservations[0].Instances[0].RootDeviceName');
+            virt_type=$(echo $resp | jq -r '.Reservations[0].Instances[0].VirtualizationType');
+            echo -e "${yellow}\n############################################################${NC}";
+            echo "Instance FQDN       :   ${green}$1 ${NC}";
+            echo "Instance Public IP  :   ${green}${instance_public_ip}${NC}"
+            echo "Instance ID         :   ${green}${instance_id}${NC}";
+            echo "Region              :   ${green}${region}${NC}";
+            echo "Virtualization Type :   ${green}${virt_type}${NC}";
+            echo "Root Device         :   ${green}${root_device}${NC}";
+            echo -e "${yellow}############################################################\n${NC}";
+            
+            echo "${green}~~~~~~~~ Devices List and Their Volume Mapping ~~~~~~~~${NC}";
+            for i in "${!dev_names[@]}"; do
+                echo "${cyan}${dev_names[$i]} => ${vol_ids[$i]}${NC}";
+            done
+        fi
+
+        if [ "$snap_flag" == 1 ]; then
+            # code for showing EBS snapshot
+            show_waiting;
+            vol_ids=( $(echo $resp | jq -r '.Reservations[0].Instances[0].BlockDeviceMappings[].Ebs.VolumeId') );
+            dev_names=( $(echo $resp |  jq -r '.Reservations[0].Instances[0].BlockDeviceMappings[].DeviceName') );
+            instance_public_ip=($(echo $resp | jq -r '.Reservations[0].Instances[0].PublicIpAddress') );
+            root_device=$(echo $resp | jq -r '.Reservations[0].Instances[0].RootDeviceName');
+            virt_type=$(echo $resp | jq -r '.Reservations[0].Instances[0].VirtualizationType');
+
+            echo -e "${yellow}\n############################################################${NC}";
+            echo "Instance FQDN       :   ${green}$1 ${NC}";
+            echo "Instance Public IP  :   ${green}${instance_public_ip}${NC}"
+            echo "Instance ID         :   ${green}${instance_id}${NC}";
+            echo "Region              :   ${green}${region}${NC}";
+            echo "Virtualization Type :   ${green}${virt_type}${NC}";
+            echo "Root Device         :   ${green}${root_device}${NC}";
+            echo -e "${yellow}############################################################\n${NC}";
+            
+            echo "${green}~~~~~~~~ Devices List and Their Volume Mapping ~~~~~~~~${NC}";
+            for i in "${!dev_names[@]}"; do
+                echo "${cyan}${i}. ${dev_names[$i]} => ${vol_ids[$i]}${NC}";
+            done
+            echo "";
+            echo -n "Select Device: ";
+            read device_id;
+
+            # checks for input type / input limit
+
+            volume_id=${vol_ids[$device_id]};
+            get_snapshot $volume_id $region;
+        fi
+        
+        if [ "$df_flag" == 1 ]; then
+        # show disk usage for the instance
+            show_disk_usage ${instance_private_ip};
+        fi
+    fi
+}
+
+function get_snapshot(){
+    show_waiting;
+    snap_resp=$(aws --region $2 ec2 describe-snapshots --filter "Name=volume-id,Values=$1");
+    snap_id=$(echo $snap_resp | jq -r '.[]|max_by(.StartTime)|.SnapshotId');
+    snap_time=$(echo $snap_resp | jq -r '.[]|max_by(.StartTime)|.StartTime')
+    echo -e "\n${green}___________________________________________${NC}\n";
+    echo "Volume      :    ${green}$1${NC}";
+    echo "Snapshot ID :    ${green}$snap_id${NC}";
+    echo "Date Taken  :    ${green}$snap_time${NC}";
+    echo -e "\n${green}___________________________________________${NC}\n";
+}
+
+function get_stack_region(){
+    fqdn=$1;
+    PERSONAL_ACCESS_TOKEN=${GITHUB_TOKEN:=$GPAT}
+    if [ -z "$PERSONAL_ACCESS_TOKEN" ]; then
+       die "GitHub Token is not set! Please set it as Environment Variable (GITHUB_TOKEN) or modify the script accordingly";
+    fi
+    stackid=$(echo $fqdn | cut -d '.' -f 2);
+    url="https://api.github.com/repos/SplunkStorm/stax/contents/$stackid.json?access_token=$PERSONAL_ACCESS_TOKEN";
+    stack_po=$(curl -s ${url} | jq -r '.content' | base64 --decode);
+    cloud_region=$(echo $stack_po | jq -r '.attributes.cloud_region');
+    echo $cloud_region;
+}
+
+function main_fn(){
+    # Main function code
+    if [ -z "$domain" ]; then
+        die "Please provide an option.Use -h for seeing the options available";
+    fi
+    reg=$(get_stack_region "$domain");
+    if [ -z "$reg" ]; then
+        exit 1;
+    fi
+    get_instance_list $domain $reg;
+}
+
+while getopts 'f:smuh' option; do
+  case "$option" in
+	f) domain=$OPTARG
+	   ;;
+    s) snap_flag=1
+       ;;  
+    m) map_flag=1
+       ;;
+    u) df_flag=1
+       ;;
+    h) help
+       exit 0
+        ;;
+	esac
+done
+
+main_fn
